@@ -5,6 +5,7 @@ from main import *
 
 deny_tcp_basic_rules = 'test_rules/deny_tcp_basic.conf'
 deny_dns_basic_rules = 'test_rules/deny_dns_basic.conf'
+log_http_rules = 'test_rules/log_http.conf'
 
 def carry_around_add(a, b):
     c = a + b
@@ -137,6 +138,18 @@ class StatefulTests(unittest.TestCase):
         f.handle_packet(PKT_DIR_INCOMING, dns_packet)
         # Assert that we called the send_ip_packet method
         self.assertTrue(mock_send_ip_packet.called)
+
+    """
+    HTTP
+    """
+
+    def test_basic_http_rule_parsing(self):
+        rules = Rules(log_http_rules)
+        binary_packet = BinaryPacket().get_tcp_packet()
+        packet = Packet(pkt_dir=PKT_DIR_INCOMING, pkt=binary_packet, geoDB=None)
+        result = rules.result_for_pkt(packet)
+        # Just test that we register correctly a log
+        self.assertEqual(RULE_RESULT_LOG, result)
 
 
 class BinaryPacketTests(unittest.TestCase):
