@@ -38,7 +38,10 @@ class Firewall:
         elif result == RULE_RESULT_DENY:
             if packet.protocol == socket.IPPROTO_TCP:
                 self.inject_rst_pkt(packet)
-            return
+            elif packet.protocol == socket.IPPROTO_UDP:
+                # Definitely a DNS since we only have deny for dns and tcp, not udp
+                self.inject_dns_pkt(packet)
+
 
     def inject_rst_pkt(self, packet):
         binary_packet = BinaryPacket()
@@ -59,6 +62,14 @@ class Firewall:
             self.iface_ext.send_ip_packet(pkt)
         elif packet.pkt_dir == PKT_DIR_OUTGOING:
             self.iface_int.send_ip_packet(pkt)
+
+    def inject_dns_pkt(self, packet):
+        qtype = packet.get_qtype()
+        if qtype == 28:
+            # Do not send a response to qtype AAAA
+            return
+        # Construct a DNS response
+
 
 """
 Misc helper functions
@@ -566,6 +577,7 @@ class Rule:
             return False
         # DNS rule only applies to packets with port 53
         if packet.get_src_port() != 53:
+            print(packet.get_src_port())
             return False
         # Must have exactly 1 DNS query
         if packet.get_qdcount() > 1:

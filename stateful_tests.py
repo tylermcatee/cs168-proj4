@@ -4,6 +4,7 @@ import mock
 from main import *
 
 deny_tcp_basic_rules = 'test_rules/deny_tcp_basic.conf'
+deny_dns_basic_rules = 'test_rules/deny_dns_basic.conf'
 
 def carry_around_add(a, b):
     c = a + b
@@ -17,6 +18,10 @@ def checksum(msg):
     return ~s & 0xffff
 
 class StatefulTests(unittest.TestCase):
+
+    """
+    TCP
+    """
 
     def test_basic_tcp_deny(self):
         rules = Rules(deny_tcp_basic_rules)
@@ -80,6 +85,58 @@ class StatefulTests(unittest.TestCase):
         # Destination should be the source of the packet we sent in
         self.assertEqual(outgoing_packet.get_dst_port(), sent_packet.get_src_port())
         self.assertEqual(outgoing_packet.get_dst_ip(), sent_packet.get_src_ip())
+
+    """
+    DNS
+    """
+
+    def test_basic_dns_deny(self):
+        rules = Rules(deny_dns_basic_rules)
+        binary_packet = BinaryPacket()
+        binary_packet.dns_question = "www.google.com"
+        binary_packet.udp_source = 53
+        dns_packet = binary_packet.get_dns_packet()
+        packet = Packet(pkt_dir=PKT_DIR_INCOMING, pkt=dns_packet, geoDB=None)
+        result = rules.result_for_pkt(packet)
+        # Just test that we register correctly a deny
+        self.assertEqual(RULE_RESULT_DENY, result)
+
+    @mock.patch.object(Firewall, 'inject_dns_pkt')
+    def test_firewall_executes_dns_deny_path(self, mock_inject):
+        config = {'rule' : deny_dns_basic_rules}
+        f = Firewall(config, None, None)
+        binary_packet = BinaryPacket()
+        binary_packet.dns_question = "www.google.com"
+        binary_packet.udp_source = 53
+        dns_packet = binary_packet.get_dns_packet()
+        f.handle_packet(PKT_DIR_INCOMING, dns_packet)
+        self.assertTrue(mock_inject.called)
+
+    @mock.patch.object(EthernetInterface, 'send_ip_packet')
+    def test_qtype_aaaa_does_not_call_send_ip_packet(self, mock_send_ip_packet):
+        config = {'rule' : deny_dns_basic_rules}
+        f = Firewall(config, iface_int=EthernetInterface(), iface_ext=EthernetInterface())
+        binary_packet = BinaryPacket()
+        binary_packet.dns_question = "www.google.com"
+        binary_packet.udp_source = 53
+        binary_packet.dns_qtype = 28
+        dns_packet = binary_packet.get_dns_packet()
+        f.handle_packet(PKT_DIR_INCOMING, dns_packet)
+        # Assert that we called the send_ip_packet method
+        self.assertFalse(mock_send_ip_packet.called)
+
+    @mock.patch.object(EthernetInterface, 'send_ip_packet')
+    def test_qtype_a_does_call_send_ip_packet(self, mock_send_ip_packet):
+        config = {'rule' : deny_dns_basic_rules}
+        f = Firewall(config, iface_int=EthernetInterface(), iface_ext=EthernetInterface())
+        binary_packet = BinaryPacket()
+        binary_packet.dns_question = "www.google.com"
+        binary_packet.udp_source = 53
+        binary_packet.dns_qtype = 1
+        dns_packet = binary_packet.get_dns_packet()
+        f.handle_packet(PKT_DIR_INCOMING, dns_packet)
+        # Assert that we called the send_ip_packet method
+        self.assertTrue(mock_send_ip_packet.called)
 
 
 class BinaryPacketTests(unittest.TestCase):
