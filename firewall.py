@@ -352,6 +352,8 @@ class BinaryPacket:
         self.dns_nscount = 0 # (2 bytes)
         self.dns_arcount = 0 # (2 bytes)
 
+        self.dns_ttl = 1 # As according to the specification
+
         self.dns_question = "www.google.com"
         self.dns_qtype = 1
         self.dns_qclass = 1
@@ -426,6 +428,31 @@ class BinaryPacket:
         qclass = struct.pack('!H', self.dns_qclass)
 
         return qname + qtype + qclass
+
+    def get_dns_answer(self):
+        """
+        For the dns answer I'm going to hijack the dns question
+        creator I created when testing project 3
+        """
+        # Construct the qname from the components
+        dns_comps = self.dns_question.split(".")
+        name = ""
+        for component in dns_comps:
+            length = len(component)
+            name += struct.pack('!B', length)
+            for char in component:
+                name += struct.pack('!B', ord(char))
+        name += struct.pack('!B', 0)
+        # Add the type
+        _type = struct.pack('!H', self.dns_qtype)
+        # Get the class
+        _class = struct.pack('!H', self.dns_qclass)
+        # Get the ttl
+        ttl = struct.pack('!H', self.dns_ttl)
+
+        # TODO: Get the rdata and rdlength
+
+        return ""
 
     # Construct the packets
     def get_tcp_packet(self):
