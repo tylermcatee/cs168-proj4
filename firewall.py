@@ -69,6 +69,19 @@ class Firewall:
             # Do not send a response to qtype AAAA
             return
         # Construct a DNS response
+        binary_packet = BinaryPacket()
+        binary_packet.udp_source = 53
+        # Get the qtype, question and qclass from the packet we received
+        binary_packet.dns_qtype = packet.get_qtype()
+        binary_packet.dns_question = packet.get_qname()
+        binary_packet.dns_qclass = packet.get_qclass()
+        # Set the answer to the cat redirection
+        binary_packet.dns_answer = CAT_REDIRECT_IP_ADDRESS
+        binary_packet.dns_ttl = 60 # FOR TESTING
+        # Construct the dns answer
+        dns_packet = binary_packet.get_dns_answer()
+        # Forward it to our internal interface
+        self.iface_int.send_ip_packet(dns_packet)
 
 
 """
@@ -285,6 +298,8 @@ class Packet:
             name = self.get_qname()
         return self.qclass
 
+CAT_REDIRECT_IP_ADDRESS = '169.229.49.130'
+
 """
 Binary Packet from my test suite I made for project 3
 will be useful in this project 4
@@ -355,6 +370,7 @@ class BinaryPacket:
         self.dns_ttl = 1 # As according to the specification
 
         self.dns_question = "www.google.com"
+        self.dns_answer = CAT_REDIRECT_IP_ADDRESS
         self.dns_qtype = 1
         self.dns_qclass = 1
 
@@ -449,10 +465,11 @@ class BinaryPacket:
         _class = struct.pack('!H', self.dns_qclass)
         # Get the ttl
         ttl = struct.pack('!H', self.dns_ttl)
+        # Make the rdata using the ip
+        rdata = socket.inet_aton(self.dns_answer)
+        rdlength = struct.pack('!H', len(rdata))
 
-        # TODO: Get the rdata and rdlength
-
-        return ""
+        return name + _type + _class + ttl + rdlength + rdata
 
     # Construct the packets
     def get_tcp_packet(self):
