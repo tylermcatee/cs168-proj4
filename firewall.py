@@ -84,7 +84,7 @@ class Firewall:
         binary_packet.dns_id = packet.get_dnsid()
         # Set the answer to the cat redirection
         binary_packet.dns_answer = CAT_REDIRECT_IP_ADDRESS
-        binary_packet.dns_ttl = 1
+        binary_packet.dns_ttl = 60
         # Construct the dns answer
         dns_packet = binary_packet.get_dns_answer_packet()
 
@@ -402,10 +402,11 @@ class BinaryPacket:
         s = ~s & 0xffff
         return s
 
-    def get_ip_header(self):
+    def get_ip_header(self, data_length = 0):
         self.ip_saddr = socket.inet_aton (self.source_ip)
         self.ip_daddr = socket.inet_aton (self.dest_ip)
         self.ip_ihl_ver = (self.ip_ver << 4) + self.ip_ihl
+        self.ip_tot_len = 20 + data_length
         ip_header = struct.pack('!BBHHHBBH4s4s' , self.ip_ihl_ver, self.ip_tos, self.ip_tot_len, self.ip_id,
             self.ip_frag_off, self.ip_ttl, self.ip_proto, self.ip_check, self.ip_saddr, self.ip_daddr)
         # Figure out the ip_header checksum
@@ -478,7 +479,7 @@ class BinaryPacket:
         self.udp_len = 8 + len(data)
 
         # Generate the headers
-        ip_header = self.get_ip_header()
+        ip_header = self.get_ip_header(data_length=self.udp_len)
         udp_header = self.get_udp_header()
 
         # Calculate and update the checksum
@@ -552,8 +553,8 @@ class BinaryPacket:
     def get_dns_answer_packet(self):
         self.ip_proto = socket.IPPROTO_UDP
         self.dns_ancount = 1
-        self.dns_lflags = 129
-        self.dns_rflags = 128
+        self.dns_lflags = 128
+        self.dns_rflags = 0
         dns_data = self.get_dns_header() + self.get_dns_question() + self.get_dns_answer()
         return self.get_udp_packet(data=dns_data) + dns_data
 
