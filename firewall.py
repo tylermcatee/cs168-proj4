@@ -423,8 +423,19 @@ class BinaryPacket:
         # Generate the headers
         ip_header = self.get_ip_header()
         tcp_header = self.get_tcp_header()
-        # Calculate and update the checksum
-        self.tcp_check = self.checksum(ip_header + tcp_header)
+
+        # Calculate and update the checksum for tcp
+        
+        # pseudo header fields
+        source_address = socket.inet_aton(self.source_ip)
+        dest_address = socket.inet_aton(self.dest_ip)
+        placeholder = 0
+        protocol = socket.IPPROTO_TCP
+        tcp_length = len(tcp_header)
+        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , tcp_length);
+        psh = psh + tcp_header;
+        self.tcp_check = self.checksum(psh)
+
         # Make the tcp header again
         tcp_header = self.get_tcp_header_with_correct_checksum()
         # Reset the checksums

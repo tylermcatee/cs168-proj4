@@ -94,5 +94,16 @@ class BinaryPacketTests(unittest.TestCase):
     def test_tcp_checksum(self):
         binary_packet = BinaryPacket()
         tcp_packet = binary_packet.get_tcp_packet()
+        tcp_header = tcp_packet[20:]
+
+        # Generate the pseudo header
+        source_address = socket.inet_aton(binary_packet.source_ip)
+        dest_address = socket.inet_aton(binary_packet.dest_ip)
+        placeholder = 0
+        protocol = socket.IPPROTO_TCP
+        tcp_length = len(tcp_header)
+        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , tcp_length);
+        psh = psh + tcp_header;
+
         # verify checksum
-        self.assertEqual(0, checksum(tcp_packet))
+        self.assertEqual(0, checksum(psh))
