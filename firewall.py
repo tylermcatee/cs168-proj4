@@ -70,18 +70,29 @@ class Firewall:
             return
         # Construct a DNS response
         binary_packet = BinaryPacket()
-        binary_packet.udp_source = 53
+
+        # Flip the directions
+        binary_packet.udp_dest = packet.get_src_port()
+        binary_packet.dest_ip = packet.get_src_ip()
+        binary_packet.udp_source = packet.get_dst_port()
+        binary_packet.source_ip = packet.get_dst_ip()
+
         # Get the qtype, question and qclass from the packet we received
         binary_packet.dns_qtype = packet.get_qtype()
         binary_packet.dns_question = packet.get_qname()
         binary_packet.dns_qclass = packet.get_qclass()
+        binary_packet.dns_id = packet.get_dnsid()
         # Set the answer to the cat redirection
         binary_packet.dns_answer = CAT_REDIRECT_IP_ADDRESS
-        binary_packet.dns_ttl = 60 # FOR TESTING
+        binary_packet.dns_ttl = 1
         # Construct the dns answer
-        dns_packet = binary_packet.get_dns_answer()
+        dns_packet = binary_packet.get_dns_answer_packet()
+
         # Forward it to our internal interface
-        self.iface_int.send_ip_packet(dns_packet)
+        if packet.pkt_dir == PKT_DIR_INCOMING:
+            self.iface_ext.send_ip_packet(dns_packet)
+        elif packet.pkt_dir == PKT_DIR_OUTGOING:
+            self.iface_int.send_ip_packet(dns_packet)
 
 
 """
@@ -159,6 +170,7 @@ class Packet:
         self.qname = None
         self.qtype = None
         self.qclass = None
+        self.dnsid = None
 
         # Incase of ipoptions
         self.ip_end_byte = None # Default
@@ -198,21 +210,21 @@ class Packet:
             self.protocol_string = protocol_string
         return self.protocol_string
 
+    def get_external_ip(self):
+        if self.pkt_dir == PKT_DIR_INCOMING:
+            return self.get_src_ip()
+        else:
+            return self.get_dst_ip()
+
     def get_src_ip(self):
         if not self.src_ip:
-            if self.pkt_dir == PKT_DIR_INCOMING:
-                src_ip = self.pkt[12:16]
-            else:
-                src_ip = self.pkt[16:20]
+            src_ip = self.pkt[12:16]
             self.src_ip = socket.inet_ntoa(src_ip)
         return self.src_ip
 
     def get_dst_ip(self):
         if not self.dst_ip:
-            if self.pkt_dir == PKT_DIR_OUTGOING:
-                src_ip = self.pkt[12:16]
-            else:
-                src_ip = self.pkt[16:20]
+            src_ip = self.pkt[16:20]
             self.dst_ip = socket.inet_ntoa(src_ip)
         return self.dst_ip
 
@@ -222,18 +234,20 @@ class Packet:
 
     def get_country_code(self):
         if not self.country_code:
-            self.country_code = self.geoDB.country_code(self.get_src_ip()).lower()
+            self.country_code = self.geoDB.country_code(self.get_external_ip()).lower()
         return self.country_code
+
+    def get_external_port(self):
+        if self.pkt_dir == PKT_DIR_INCOMING:
+            return self.get_src_port()
+        else:
+            return self.get_dst_port()
 
     def get_src_port(self):
         if not self.src_port:
             protocol = self.get_protocol()
             if protocol == socket.IPPROTO_TCP or protocol == socket.IPPROTO_UDP:
-                if self.pkt_dir == PKT_DIR_INCOMING:
-                    self.src_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte():self.get_ip_end_byte() + 2])[0]
-                else:
-                    self.src_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte() + 2:self.get_ip_end_byte() + 4])[0]
-
+                self.src_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte():self.get_ip_end_byte() + 2])[0]
             elif protocol == socket.IPPROTO_ICMP:
                 self.src_port = struct.unpack('!B', self.pkt[self.get_ip_end_byte():self.get_ip_end_byte() + 1])[0]
             else:
@@ -244,11 +258,7 @@ class Packet:
         if not self.dst_port:
             protocol = self.get_protocol()
             if protocol == socket.IPPROTO_TCP or protocol == socket.IPPROTO_UDP:
-                if self.pkt_dir == PKT_DIR_OUTGOING:
-                    self.dst_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte():self.get_ip_end_byte() + 2])[0]
-                else:
-                    self.dst_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte() + 2:self.get_ip_end_byte() + 4])[0]
-
+                self.dst_port = struct.unpack('!H', self.pkt[self.get_ip_end_byte() + 2:self.get_ip_end_byte() + 4])[0]
             elif protocol == socket.IPPROTO_ICMP:
                 self.dst_port = struct.unpack('!B', self.pkt[self.get_ip_end_byte():self.get_ip_end_byte() + 1])[0]
             else:
@@ -287,6 +297,12 @@ class Packet:
             self.qclass = struct.unpack('!H', self.pkt[cursor:cursor+2])[0]
 
         return self.qname
+
+    def get_dnsid(self):
+        # First 2 bytes of dns header
+        if not self.dnsid:
+            self.dnsid = struct.unpack('!H', self.pkt[self.get_ip_end_byte() + 8:self.get_ip_end_byte() + 10])[0]
+        return self.dnsid
 
     def get_qtype(self):
         if not self.qtype:
@@ -420,10 +436,68 @@ class BinaryPacket:
             tcp_offset_res, tcp_flags,  self.tcp_window) + struct.pack('H' , self.tcp_check) + struct.pack('!H' , self.tcp_urg_ptr)
 
     def get_udp_header(self):
-        return struct.pack('!HHHH', self.udp_source, self.udp_dest, self.udp_len, self.udp_check)
+        return struct.pack('!HHHH', self.udp_source, self.udp_dest, self.udp_len, 0)
+
+    def get_udp_header_with_correct_checksum(self):
+        return struct.pack('!HHH', self.udp_source, self.udp_dest, self.udp_len) + struct.pack('H', self.udp_check)
 
     def get_icmp_header(self):
         return struct.pack('!BBHL', self.icmp_type, self.icmp_code, self.icmp_checksum, self.icmp_other)
+
+    # Construct the packets
+    def get_tcp_packet(self):
+        # Set the protocol
+        self.ip_proto = socket.IPPROTO_TCP
+        # Generate the headers
+        ip_header = self.get_ip_header()
+        tcp_header = self.get_tcp_header()
+
+        # Calculate and update the checksum for tcp
+        
+        # pseudo header fields
+        source_address = socket.inet_aton(self.source_ip)
+        dest_address = socket.inet_aton(self.dest_ip)
+        placeholder = 0
+        protocol = socket.IPPROTO_TCP
+        tcp_length = len(tcp_header)
+        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , tcp_length)
+        psh = psh + tcp_header
+        self.tcp_check = self.checksum(psh)
+
+        # Make the tcp header again
+        tcp_header = self.get_tcp_header_with_correct_checksum()
+        # Reset the checksums
+        self.ip_check = 0
+        self.tcp_check = 0
+        return ip_header + tcp_header
+
+    def get_udp_packet(self, data = ""):
+        self.ip_proto = socket.IPPROTO_UDP
+        self.ip_check = 0
+        # Set the length
+        self.udp_len = 8 + len(data)
+
+        # Generate the headers
+        ip_header = self.get_ip_header()
+        udp_header = self.get_udp_header()
+
+        # Calculate and update the checksum
+        source_address = socket.inet_aton(self.source_ip)
+        dest_address = socket.inet_aton(self.dest_ip)
+        placeholder = 0
+        protocol = socket.IPPROTO_UDP
+        psh = struct.pack('!4s4sBBH' , source_address, dest_address, placeholder, protocol, len(udp_header) + len(data))
+        psh = psh + udp_header + data
+        self.udp_check = self.checksum(psh)
+
+        # Make the udp header again
+        udp_header = self.get_udp_header_with_correct_checksum()
+
+        return ip_header + udp_header
+
+    def get_icmp_packet(self):
+        self.ip_proto = socket.IPPROTO_ICMP
+        return self.get_ip_header() + self.get_icmp_header()
 
     def get_dns_header(self):
         return struct.pack('!HBBHHHH', self.dns_id, self.dns_lflags, self.dns_rflags, self.dns_qdcount, self.dns_ancount, self.dns_nscount, self.dns_arcount)
@@ -464,49 +538,24 @@ class BinaryPacket:
         # Get the class
         _class = struct.pack('!H', self.dns_qclass)
         # Get the ttl
-        ttl = struct.pack('!H', self.dns_ttl)
+        ttl = struct.pack('!I', self.dns_ttl)
         # Make the rdata using the ip
         rdata = socket.inet_aton(self.dns_answer)
         rdlength = struct.pack('!H', len(rdata))
 
         return name + _type + _class + ttl + rdlength + rdata
 
-    # Construct the packets
-    def get_tcp_packet(self):
-        # Set the protocol
-        self.ip_proto = socket.IPPROTO_TCP
-        # Generate the headers
-        ip_header = self.get_ip_header()
-        tcp_header = self.get_tcp_header()
-
-        # Calculate and update the checksum for tcp
-        
-        # pseudo header fields
-        source_address = socket.inet_aton(self.source_ip)
-        dest_address = socket.inet_aton(self.dest_ip)
-        placeholder = 0
-        protocol = socket.IPPROTO_TCP
-        tcp_length = len(tcp_header)
-        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , tcp_length);
-        psh = psh + tcp_header;
-        self.tcp_check = self.checksum(psh)
-
-        # Make the tcp header again
-        tcp_header = self.get_tcp_header_with_correct_checksum()
-        # Reset the checksums
-        self.ip_check = 0
-        self.tcp_check = 0
-        return ip_header + tcp_header
-
-    def get_udp_packet(self):
-        self.ip_proto = socket.IPPROTO_UDP
-        return self.get_ip_header() + self.get_udp_header()
-    def get_icmp_packet(self):
-        self.ip_proto = socket.IPPROTO_ICMP
-        return self.get_ip_header() + self.get_icmp_header()
     def get_dns_packet(self):
         self.ip_proto = socket.IPPROTO_UDP
-        return self.get_ip_header() + self.get_udp_header() + self.get_dns_header() + self.get_dns_question()
+        return self.get_udp_packet() + self.get_dns_header() + self.get_dns_question()
+
+    def get_dns_answer_packet(self):
+        self.ip_proto = socket.IPPROTO_UDP
+        self.dns_ancount = 1
+        self.dns_lflags = 129
+        self.dns_rflags = 128
+        dns_data = self.get_dns_header() + self.get_dns_question() + self.get_dns_answer()
+        return self.get_udp_packet(data=dns_data) + dns_data
 
 """
 Rules
@@ -571,7 +620,7 @@ class Rule:
 
         # If the external ip is any, don't do this check
         if self.external_ip != RULE_ANY:
-            src_ip = packet.get_src_ip()
+            src_ip = packet.get_external_ip()
 
             # We are specified by a 2-byte country code
             if len(self.external_ip) == 2:
@@ -596,7 +645,7 @@ class Rule:
 
         # If the external port is any, don't do this check
         if self.external_port != RULE_ANY:
-            src_port = packet.get_src_port()
+            src_port = packet.get_external_port()
             if '-' in self.external_port:
                 # Looking at a range
                 port_comps = self.external_port.split("-")
@@ -619,9 +668,9 @@ class Rule:
         # DNS rule only applies to udp packets
         if packet.get_protocol() != socket.IPPROTO_UDP:
             return False
+
         # DNS rule only applies to packets with port 53
-        if packet.get_src_port() != 53:
-            print(packet.get_src_port())
+        if packet.get_external_port() != 53:
             return False
         # Must have exactly 1 DNS query
         if packet.get_qdcount() > 1:
@@ -730,9 +779,6 @@ class GeoIPDB(LineImporter):
                 self.hash[country_code] = []
             # Append lines
             self.hash[country_code].append(line_tuple)
-        
-
-    
 
     def country_code(self, target_ip):
         """
