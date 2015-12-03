@@ -1,6 +1,5 @@
 import unittest
 from firewall import *
-from BinaryPacket import *
 
 empty_rules = 'test_rules/empty.conf'
 block_all_rules = 'test_rules/no.conf'
