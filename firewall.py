@@ -36,6 +36,7 @@ class Firewall:
             # Drop!
             return
         elif result == RULE_RESULT_DENY:
+            print("DENY!!!")
             if packet.protocol == socket.IPPROTO_TCP:
                 self.inject_rst_pkt(packet)
             elif packet.protocol == socket.IPPROTO_UDP:
@@ -47,14 +48,13 @@ class Firewall:
         binary_packet = BinaryPacket()
         # Set the reset flag
         binary_packet.tcp_rst = 1
-        # Set the destination port and ip to the source
-        # port and ip
+
+        # Flip the directions
         binary_packet.tcp_dest = packet.get_src_port()
         binary_packet.dest_ip = packet.get_src_ip()
-        # Set the source port and ip to the destination
-        # port and ip
-        binary_packet.tcp_dest = packet.get_src_port()
-        binary_packet.dest_ip = packet.get_src_ip()
+        binary_packet.tcp_source = packet.get_dst_port()
+        binary_packet.source_ip = packet.get_dst_ip()
+
         # Generate the packet
         pkt = binary_packet.get_tcp_packet()
         # Send the rst
@@ -422,6 +422,9 @@ class BinaryPacket:
         return struct.pack('!BBHHHBB' , self.ip_ihl_ver, self.ip_tos, self.ip_tot_len, self.ip_id,
             self.ip_frag_off, self.ip_ttl, self.ip_proto) + struct.pack('H', self.ip_check) + struct.pack('!4s', self.ip_saddr) + struct.pack('!4s', self.ip_daddr)
 
+    def get_icmp_header(self):
+        return struct.pack('!BBHL', self.icmp_type, self.icmp_code, self.icmp_checksum, self.icmp_other)
+
     def get_tcp_header(self):
         tcp_offset_res = (self.tcp_doff << 4) + 0
         tcp_flags = self.tcp_fin + (self.tcp_syn << 1) + (self.tcp_rst << 2) + (self.tcp_psh <<3) \
@@ -436,22 +439,14 @@ class BinaryPacket:
         return struct.pack('!HHLLBBH' , self.tcp_source, self.tcp_dest, self.tcp_seq, self.tcp_ack_seq, 
             tcp_offset_res, tcp_flags,  self.tcp_window) + struct.pack('H' , self.tcp_check) + struct.pack('!H' , self.tcp_urg_ptr)
 
-    def get_udp_header(self):
-        return struct.pack('!HHHH', self.udp_source, self.udp_dest, self.udp_len, 0)
-
-    def get_udp_header_with_correct_checksum(self):
-        return struct.pack('!HHH', self.udp_source, self.udp_dest, self.udp_len) + struct.pack('H', self.udp_check)
-
-    def get_icmp_header(self):
-        return struct.pack('!BBHL', self.icmp_type, self.icmp_code, self.icmp_checksum, self.icmp_other)
-
     # Construct the packets
     def get_tcp_packet(self):
         # Set the protocol
         self.ip_proto = socket.IPPROTO_TCP
+        self.ip_check = 0
         # Generate the headers
-        ip_header = self.get_ip_header()
         tcp_header = self.get_tcp_header()
+        ip_header = self.get_ip_header(data_length=len(tcp_header))
 
         # Calculate and update the checksum for tcp
         
@@ -460,17 +455,23 @@ class BinaryPacket:
         dest_address = socket.inet_aton(self.dest_ip)
         placeholder = 0
         protocol = socket.IPPROTO_TCP
-        tcp_length = len(tcp_header)
-        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , tcp_length)
+        psh = struct.pack('!4s4sBBH' , source_address , dest_address , placeholder , protocol , len(tcp_header))
         psh = psh + tcp_header
         self.tcp_check = self.checksum(psh)
 
         # Make the tcp header again
         tcp_header = self.get_tcp_header_with_correct_checksum()
+
         # Reset the checksums
         self.ip_check = 0
         self.tcp_check = 0
         return ip_header + tcp_header
+
+    def get_udp_header(self):
+        return struct.pack('!HHHH', self.udp_source, self.udp_dest, self.udp_len, 0)
+
+    def get_udp_header_with_correct_checksum(self):
+        return struct.pack('!HHH', self.udp_source, self.udp_dest, self.udp_len) + struct.pack('H', self.udp_check)
 
     def get_udp_packet(self, data = ""):
         self.ip_proto = socket.IPPROTO_UDP
