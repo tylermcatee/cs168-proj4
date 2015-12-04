@@ -23,7 +23,7 @@ class Firewall:
         self.geoDB = GeoIPDB(filename=geoipdb_filename)
 
         # Load the HttpLogger
-        self.http_logger = HttpLogger()
+        self.http_logger = HttpLogger(http_rules=self.rules.http_rules)
 
     # @pkt_dir: either PKT_DIR_INCOMING or PKT_DIR_OUTGOING
     # @pkt: the actual data of the IPv4 packet (including IP header)
@@ -120,11 +120,12 @@ TCP_STATE_CLOSE = "TCP_STATE_CLOSE"
 
 class HttpLogger:
 
-    def __init__(self):
+    def __init__(self, http_rules):
+        self.http_rules = http_rules
         self.byte_streams = {}
         pass
 
-    def log_http_request_response(self, http_request, http_response):
+    def log_http_request_response(self, http_request, http_response, a_packet):
         request_lines = [line.replace("\r", "") for line in http_request.split("\n")]
         response_lines = [line.replace("\r", "") for line in http_response.split("\n")]
         
@@ -132,12 +133,24 @@ class HttpLogger:
         for line in request_lines:
             components = line.split(" ")
             request_dict[components[0].lower()] = " ".join(components[1:])
+
+        if 'host:' in request_dict:
+            host_name = request_dict['host:']
+        else:
+            host_name = a_packet.get_external_ip()
+        # Before we do any more work, make sure that the rule applies
+        applies = False
+        for rule in self.http_rules:
+            if rule.rule_applies_logging(host_name):
+                applies = True
+        if not applies:
+            return # Do not log
+
         response_dict = {}
         for line in response_lines:
             components = line.split(" ")
             response_dict[components[0].lower()] = " ".join(components[1:])
         
-        host_name = request_dict['host:']
         method = request_lines[0].split(" ")[0]
         path = request_lines[0].split(" ")[1]
         version = request_lines[0].split(" ")[2]
@@ -149,7 +162,7 @@ class HttpLogger:
 
         entry = str(host_name) + " " + str(method) + " " + str(path) + " " + str(version)\
              + " " + str(status_code) + " " + str(object_size)
-        
+
         with open('http.log', 'a') as f:
             f.write(entry + "\n")
             f.flush()
@@ -230,7 +243,8 @@ class HttpLogger:
         for key in sorted(http_packets[PKT_DIR_INCOMING].keys()):
             http_response += http_packets[PKT_DIR_INCOMING][key].get_payload()
 
-        self.log_http_request_response(http_request, http_response)
+        a_packet = http_packets[PKT_DIR_OUTGOING].values()[0]
+        self.log_http_request_response(http_request, http_response, a_packet)
 
     def handle_fin_packet(self, pkt_dir, packet, id_port):
         if id_port not in self.byte_streams:
@@ -433,6 +447,34 @@ class Rule:
             self.external_ip = rule_comps[RULE_EXTERNAL_IP].lower()
             self.external_port = rule_comps[RULE_EXTERNAL_PORT]
 
+    def rule_applies_logging(self, host_name):
+        # Base case
+        if self.domain_name == '*':
+            return True
+
+        # Now check to make sure we aren't matching
+        rule_comps = [component.lower() for component in self.domain_name.split(".")][::-1]
+        host_comps = [component.lower() for component in host_name.split(".")][::-1]
+
+        for i in range(len(rule_comps)):
+            rule_comp = rule_comps[i]
+            # If rule is longer than host, fail
+            try:
+                host_comp = host_comps[i]
+            except:
+                return False
+            # If the rule stars out here, return true
+            if rule_comp == '*':
+                return True
+            # Must have equal components
+            if rule_comp != host_comp:
+                return False
+
+        if len(host_comps) > len(rule_comps):
+            return False
+
+        return True
+
 
     def rule_applies(self, packet):
         """
@@ -565,6 +607,7 @@ class Rules(LineImporter):
 
     def __init__(self, filename=None):
         self.rules = []
+        self.http_rules = []
         # Call the import function
         super(Rules, self).import_filename(filename)
         # Convert these line strings to a list of rules
@@ -578,6 +621,8 @@ class Rules(LineImporter):
             # Create the rule
             rule = Rule(rule_line=line)
             self.rules.append(rule)
+            if rule.protocol == RULE_PROTOCOL_HTTP:
+                self.http_rules.append(rule)
         # Invert the list, since the last rules hold priority
         self.rules = self.rules[::-1]
 
