@@ -139,6 +139,8 @@ class StatefulTests(unittest.TestCase):
         # Assert that we called the send_ip_packet method
         self.assertTrue(mock_send_ip_packet.called)
 
+class HttpSessionTests(unittest.TestCase):
+
     """
     HTTP
     """

@@ -22,6 +22,9 @@ class Firewall:
         geoipdb_filename = 'geoipdb.txt'
         self.geoDB = GeoIPDB(filename=geoipdb_filename)
 
+        # Load the HttpLogger
+        self.http_logger = HttpLogger()
+
     # @pkt_dir: either PKT_DIR_INCOMING or PKT_DIR_OUTGOING
     # @pkt: the actual data of the IPv4 packet (including IP header)
     def handle_packet(self, pkt_dir, pkt):
@@ -41,6 +44,15 @@ class Firewall:
             elif packet.protocol == socket.IPPROTO_UDP:
                 # Definitely a DNS since we only have deny for dns and tcp, not udp
                 self.inject_dns_pkt(packet)
+        elif result == RULE_RESULT_LOG:
+            # Handle parsing and logging data from this packet
+            self.http_logger.handle_packet(pkt_dir, pkt)
+
+            # Pass the packet along
+            if pkt_dir == PKT_DIR_INCOMING:
+                self.iface_int.send_ip_packet(pkt)
+            elif pkt_dir == PKT_DIR_OUTGOING:
+                self.iface_ext.send_ip_packet(pkt)
 
 
     def inject_rst_pkt(self, packet):
@@ -92,6 +104,201 @@ class Firewall:
             self.iface_ext.send_ip_packet(dns_packet)
         elif packet.pkt_dir == PKT_DIR_OUTGOING:
             self.iface_int.send_ip_packet(dns_packet)
+
+
+TCP_STATE = "TCP_STATE"
+TCP_STATE_HANDSHAKE = "TCP_STATE_HANDSHAKE"
+TCP_STATE_TRANSMITTING = "TCP_STATE_TRANSMITTING"
+TCP_STATE_FIN = "TCP_STATE_FIN"
+TCP_STATE_CLOSE = "TCP_STATE_CLOSE"
+
+class HttpLogger:
+
+    def __init__(self):
+        self.byte_streams = {}
+        pass
+
+    def invert_dir(self, pkt_dir):
+        if pkt_dir == PKT_DIR_INCOMING:
+            return PKT_DIR_OUTGOING
+        else:
+            return PKT_DIR_INCOMING
+
+    def print_packet(self, pkt_dir, packet):
+
+        if pkt_dir == PKT_DIR_INCOMING:
+            dir_str = "<--- "
+        else:
+            dir_str = "---> "
+
+        if packet.get_tcp_has_payload():
+            payload = "HTTP "
+        else:
+            payload = ""
+
+        seq_no = str(packet.get_tcp_sequence())
+        port = str(packet.get_dst_port()) + " "
+
+        if packet.get_tcp_syn() and packet.get_tcp_ack():
+            print(port + dir_str + payload + "syn ack packet " + seq_no)
+        elif packet.get_tcp_fin():
+            print(port + dir_str + payload + "fin packet " + seq_no)
+        elif packet.get_tcp_syn():
+            print(port + dir_str + payload + "syn packet " + seq_no)
+        elif packet.get_tcp_ack():
+            print(port + dir_str + payload + "ack packet " + seq_no)
+        else:
+            print(dir_str + payload + "?")
+
+    def handle_packet(self, pkt_dir, pkt):
+        # Create a packet instance from pkt
+        packet = Packet(pkt_dir, pkt, geoDB=None)
+
+        # self.print_packet(pkt_dir, packet)
+
+        # Get our local port, to identify the stream
+        if pkt_dir == PKT_DIR_INCOMING:
+            id_port = packet.get_dst_port()
+        else:
+            id_port = packet.get_src_port()
+
+        # TCP HANDSHAKE
+
+        # Check if this is an initiation for a tcp connection
+        if self.is_initiating_tcp_connection(packet):
+            self.handle_initiation_packet(pkt_dir, packet, id_port)
+            return
+        # Next should come the syn ack
+        if self.is_syn_ack_packet(packet):
+            self.handle_syn_ack_packet(pkt_dir, packet, id_port)
+            return
+        # Now handle regular acks
+        if self.is_ack_or_psh_packet(packet):
+            self.handle_ack_packet(pkt_dir, packet, id_port)
+        # Now handle fin
+        if packet.get_tcp_fin():
+            self.handle_fin_packet(pkt_dir, packet, id_port)
+
+    def clean_up_stream(self, id_port):
+        """
+        We should now have all of our HTTP data
+        in the byte_streams
+        """
+        http_packets = self.byte_streams[id_port]
+
+        # Construct the http data
+        http_request = ""
+        for key in sorted(http_packets[PKT_DIR_OUTGOING].keys()):
+            http_request += http_packets[PKT_DIR_OUTGOING][key].get_payload()
+        http_response = ""
+        for key in sorted(http_packets[PKT_DIR_INCOMING].keys()):
+            http_response += http_packets[PKT_DIR_INCOMING][key].get_payload()
+
+        print(http_request)
+        print("-")
+        print(http_response)
+
+
+    def handle_fin_packet(self, pkt_dir, packet, id_port):
+        if id_port not in self.byte_streams:
+            return # Some sort of error
+
+        if self.byte_streams[id_port][TCP_STATE] != TCP_STATE_FIN:
+            self.byte_streams[id_port][TCP_STATE] = TCP_STATE_FIN
+            self.clean_up_stream(id_port)
+        else:
+            # 2nd fin marks the end of this TCP transaction
+            # Set it to close on the next ack
+            self.byte_streams[id_port][TCP_STATE] = TCP_STATE_CLOSE
+
+            
+    def handle_ack_packet(self, pkt_dir, packet, id_port):
+        if id_port in self.byte_streams:
+            state = self.byte_streams[id_port][TCP_STATE]
+        else:
+            return
+        if state == TCP_STATE_HANDSHAKE:
+            # I could do more checks here but I'm just
+            # going to move forward, I'm running out of time
+            # This marks the finish of the handshake, will now reset our dictionaries
+            self.byte_streams[id_port][TCP_STATE] = TCP_STATE_TRANSMITTING
+            # We will store the rest of the data in dictionaries
+            self.byte_streams[id_port][PKT_DIR_INCOMING] = {}
+            self.byte_streams[id_port][PKT_DIR_OUTGOING] = {}
+            return
+        elif state == TCP_STATE_TRANSMITTING:
+            # Only save HTTP packets
+            if packet.get_tcp_has_payload():
+                seq_no = packet.get_tcp_sequence()
+                # Save the packet, we'll just overwrite if duplicate
+                self.byte_streams[id_port][pkt_dir][seq_no] = packet
+        elif state == TCP_STATE_CLOSE:
+            # Remove the entry for this port
+            del self.byte_streams[id_port]
+
+
+    def is_ack_or_psh_packet(self, packet):
+        return packet.get_tcp_flags() == 16 or packet.get_tcp_flags() == 24
+
+    def is_syn_ack_packet(self, packet):
+        return packet.get_tcp_syn() and packet.get_tcp_ack()
+
+    def duplicate_packets(self, pkt1, pkt2):
+        return (pkt1.get_tcp_sequence() == pkt2.get_tcp_sequence()) and (pkt1.get_tcp_acknowledgment() == pkt2.get_tcp_acknowledgment())
+
+    def handle_syn_ack_packet(self, pkt_dir, packet, id_port):
+        inverse_dir = self.invert_dir(pkt_dir)
+        # id_port should be in in byte_streams
+        if id_port not in self.byte_streams:
+            print("Error: Received syn ack packet without ever receiving syn")
+            return
+        # we should be in handshake mode
+        if self.byte_streams[id_port][TCP_STATE] != TCP_STATE_HANDSHAKE:
+            print("Error: Received syn ack packet outside of handshake mode")
+            return
+        # we should have the syn packet stored only
+        inverse_length = len(self.byte_streams[id_port][inverse_dir])
+        if inverse_length != 1:
+            print("Error: We have %d packets in the %s direction, when we should only have 1" % (inverse_length, inverse_dir))
+            return
+        # We should have no packets stored on our direction
+        length = len(self.byte_streams[id_port][pkt_dir])
+        if length != 0:
+            colliding_syn_ack_packet = self.byte_streams[id_port][pkt_dir][0]
+            if self.duplicate_packets(colliding_syn_ack_packet,  packet):
+                # Duplicate packet, do nothing
+                return
+            else:
+                print("Error: We received an unexpected syn ack packet")
+                return
+        # Store the syn ack packet
+        self.byte_streams[id_port][pkt_dir].append(packet)
+
+
+    def is_initiating_tcp_connection(self, packet):
+        return packet.get_tcp_syn() and not packet.get_tcp_ack() \
+                and not packet.get_tcp_has_payload()
+
+    def make_byte_stream_dict(self):
+        return { PKT_DIR_INCOMING : [], PKT_DIR_OUTGOING : [], TCP_STATE : TCP_STATE_HANDSHAKE}
+
+    def handle_initiation_packet(self, pkt_dir, packet, id_port):
+        # Happy case is the port isn't in the dict yet
+        if id_port not in self.byte_streams:
+            self.byte_streams[id_port] = self.make_byte_stream_dict()
+            self.byte_streams[id_port][pkt_dir].append(packet)
+        else:
+            # Check if it is a repeat packet
+            colliding_syn_packet = self.byte_streams[id_port][pkt_dir][0]
+            if self.duplicate_packets(colliding_syn_packet, packet):
+                # Duplicate packet, do nothing
+                return
+            else:
+                # Create a new entry for this packet.
+                self.byte_streams[id_port] = self.make_byte_stream_dict()
+                self.byte_streams[id_port][pkt_dir].append(packet)
+
+
 
 
 """
@@ -447,9 +654,69 @@ class Packet:
         self.qtype = None
         self.qclass = None
         self.dnsid = None
-
         # Incase of ipoptions
         self.ip_end_byte = None # Default
+
+        # Project 4 properties
+        # Http logger
+        self.tcp_flags = None
+        self.tcp_sequence = None
+        self.tcp_acknowledgment = None
+        self.tcp_data_offset = None
+
+    """
+    Project 4 code
+    """
+    def get_tcp_flags(self):
+        if not self.tcp_flags:
+            self.tcp_flags = struct.unpack('B', self.pkt[self.get_ip_end_byte() + 13:self.get_ip_end_byte() + 14])[0]
+        return self.tcp_flags
+
+    def get_tcp_fin(self):
+        flags = self.get_tcp_flags()
+        return (flags & 1) == 1
+
+    def get_tcp_syn(self):
+        flags = self.get_tcp_flags()
+        return (flags & 2) == 2
+
+    def get_tcp_reset(self):
+        flags = self.get_tcp_flags()
+        return (flags & 4) == 4
+
+    def get_tcp_ack(self):
+        flags = self.get_tcp_flags()
+        return (flags & 16) == 16
+
+    def get_tcp_sequence(self):
+        if not self.tcp_sequence:
+            self.tcp_sequence = struct.unpack('!I', self.pkt[self.get_ip_end_byte() + 4:self.get_ip_end_byte() + 8])[0]
+        return self.tcp_sequence
+
+    def get_tcp_acknowledgment(self):
+        if not self.tcp_acknowledgment:
+            self.tcp_acknowledgment = struct.unpack('!I', self.pkt[self.get_ip_end_byte() + 8:self.get_ip_end_byte() + 12])[0]
+        return self.tcp_acknowledgment
+
+    def get_tcp_data_offset(self):
+        if not self.tcp_data_offset:
+            self.tcp_data_offset = struct.unpack('!B', self.pkt[self.get_ip_end_byte() + 12:self.get_ip_end_byte() + 13])[0]
+        return self.tcp_data_offset
+
+    def get_tcp_header_length(self):
+        return self.get_tcp_data_offset() - 20
+
+    def get_tcp_has_payload(self):
+        packet_length = len(self.pkt)
+        ip_header_length = self.get_ip_end_byte() - 20
+        return packet_length > self.get_tcp_header_length() + ip_header_length
+
+    def get_payload(self):
+        return self.pkt[self.get_tcp_data_offset():]
+
+    """
+    Project 3 code
+    """
 
     def protocol_number_to_string(self, protocol_number):
         if protocol_number == socket.IPPROTO_TCP:
