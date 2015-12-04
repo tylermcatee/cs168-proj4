@@ -59,6 +59,12 @@ class Firewall:
         binary_packet = BinaryPacket()
         # Set the reset flag
         binary_packet.tcp_rst = 1
+        binary_packet.tcp_syn = 0
+        binary_packet.tcp_ack = 1
+
+        # Copy over tcp parameters
+        binary_packet.tcp_seq = 725
+        binary_packet.tcp_ack_seq = packet.get_tcp_sequence() + 1
 
         # Flip the directions
         binary_packet.tcp_dest = packet.get_src_port()
