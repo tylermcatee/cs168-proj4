@@ -118,6 +118,36 @@ class HttpLogger:
         self.byte_streams = {}
         pass
 
+    def log_http_request_response(self, http_request, http_response):
+        request_lines = [line.replace("\r", "") for line in http_request.split("\n")]
+        response_lines = [line.replace("\r", "") for line in http_response.split("\n")]
+        
+        request_dict = {}
+        for line in request_lines:
+            components = line.split(" ")
+            request_dict[components[0].lower()] = " ".join(components[1:])
+        response_dict = {}
+        for line in response_lines:
+            components = line.split(" ")
+            response_dict[components[0].lower()] = " ".join(components[1:])
+        
+        host_name = request_dict['host:']
+        method = request_lines[0].split(" ")[0]
+        path = request_lines[0].split(" ")[1]
+        version = request_lines[0].split(" ")[2]
+        status_code = response_lines[0].split(" ")[1]
+        if 'content-length:' in response_dict:
+            object_size = response_dict['content-length:']
+        else:
+            object_size = -1
+
+        entry = str(host_name) + " " + str(method) + " " + str(path) + " " + str(version)\
+             + " " + str(status_code) + " " + str(object_size)
+        
+        with open('http.log', 'a') as f:
+            f.write(entry + "\n")
+            f.flush()
+
     def invert_dir(self, pkt_dir):
         if pkt_dir == PKT_DIR_INCOMING:
             return PKT_DIR_OUTGOING
@@ -194,10 +224,7 @@ class HttpLogger:
         for key in sorted(http_packets[PKT_DIR_INCOMING].keys()):
             http_response += http_packets[PKT_DIR_INCOMING][key].get_payload()
 
-        print(http_request)
-        print("-")
-        print(http_response)
-
+        self.log_http_request_response(http_request, http_response)
 
     def handle_fin_packet(self, pkt_dir, packet, id_port):
         if id_port not in self.byte_streams:
@@ -701,6 +728,8 @@ class Packet:
     def get_tcp_data_offset(self):
         if not self.tcp_data_offset:
             self.tcp_data_offset = struct.unpack('!B', self.pkt[self.get_ip_end_byte() + 12:self.get_ip_end_byte() + 13])[0]
+            self.tcp_data_offset = (self.tcp_data_offset >> 4) * 4
+            # We only need the leftmost 4 bits
         return self.tcp_data_offset
 
     def get_tcp_header_length(self):
@@ -708,11 +737,12 @@ class Packet:
 
     def get_tcp_has_payload(self):
         packet_length = len(self.pkt)
-        ip_header_length = self.get_ip_end_byte() - 20
-        return packet_length > self.get_tcp_header_length() + ip_header_length
+        tcp_offset = self.get_tcp_data_offset()
+        ip_header_length = self.get_ip_end_byte()
+        return packet_length > tcp_offset + ip_header_length
 
     def get_payload(self):
-        return self.pkt[self.get_tcp_data_offset():]
+        return self.pkt[self.get_ip_end_byte() + self.get_tcp_data_offset():]
 
     """
     Project 3 code
